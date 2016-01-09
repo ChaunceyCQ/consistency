@@ -1,0 +1,253 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import threading
+import Queue
+from time import ctime,sleep
+import random
+
+class Msg(object):
+    def __init__(self,info,src,dst):
+        self.src = src
+        self.dst = dst
+        self.info = info
+
+class PacketIn(object):
+    def __init__(self,msg,sw):
+        self.msg = msg
+        self.sw = sw
+
+class Controller(object):
+    def __init__(self,index):
+        self.index = index
+        self.topo={}
+        self.que = Queue.Queue(1000)
+        self.count = 0
+
+    def get_packet_in(self,packet_in):
+        self.que.put(packet_in)
+        self.count+=1
+        print self.index + " get packet_in("+packet_in.msg.info+") from "+packet_in.sw
+        print "updating network......"
+
+    def send_packet_out(self):
+        while not self.que.empty():
+            self.packet_out = self.que.get()
+            print self.index+" send packet_out("+self.packet_out.msg.info+") to "+self.packet_out.sw
+            self.topo[self.packet_out.sw].get_from_controller(self.packet_out.msg)
+        
+class Host(object):
+    def __init__(self,index,p=0):
+        self.index = index
+        self.next = p
+        self.que = Queue.Queue(1000)
+        self.send_count = 0
+        self.get_count = 0
+
+    def send_msg(self,msg):
+        self.msg = msg
+        print self.index+" send msg:"+msg.info+" "+ctime()
+        self.send_count+=1
+        self.next.get_msg(self.msg)
+        
+    def get_msg(self,msg):
+        self.que.put(msg)
+        print self.index+" get  msg:"+self.que.get().info
+        self.get_count+=1
+
+
+class Switch(object):
+    def __init__(self,index,controller,p=0):
+        self.index = index
+        self.next = p
+        self.controller = controller
+        self.que = Queue.Queue(1000)
+        self.to_controller = 0
+        self.count=0
+
+    def get_msg(self,msg):
+        sleep(0.1)
+        self.que.put(msg)
+        self.count+=1
+        print self.index+" get  msg:"+msg.info
+        #if self.index != msg.dst:
+        self.send_msg()
+
+    def send_msg(self):
+        msg = self.que.get()
+        if self.to_controller:
+            self.send_to_controller(msg)
+        else:
+            print self.index+" send msg:"+msg.info
+            self.next.get_msg(msg)
+
+    def send_to_controller(self,msg):
+        packet_in = PacketIn(msg,self.index)
+        print self.index+" send msg:"+msg.info+" to controller"
+        self.controller.get_packet_in(packet_in)
+
+    def get_from_controller(self,msg):
+        self.que.put(msg)
+        print self.index+" get packet out:"+msg.info
+        #self.to_controller = 0
+        #if self.index != msg.dst:
+        self.next.get_msg(msg)     
+
+
+class Network(object):
+    def __init__(self):
+        #init controller
+        self.c = Controller('c0')
+        self.head=0
+
+    def initnetwork(self):
+
+        h1 = Host('h1')
+        h2 = Host('h2')
+        s1 = Switch('s1',self.c)
+        s2 = Switch('s2',self.c)
+        s3 = Switch('s3',self.c)
+        s4 = Switch('s4',self.c)
+        s5 = Switch('s5',self.c)
+        s6 = Switch('s6',self.c)
+        s7 = Switch('s7',self.c)
+
+        self.c.topo['h1'] = h1
+        self.c.topo['h2'] = h2
+        self.c.topo['s1'] = s1
+        self.c.topo['s2'] = s2
+        self.c.topo['s3'] = s3
+        self.c.topo['s4'] = s4
+        self.c.topo['s5'] = s5
+        self.c.topo['s6'] = s6
+        self.c.topo['s7'] = s7
+
+        h1.next = s1
+        s1.next = s2
+        s2.next = s3
+        s3.next = s4
+        s4.next = s5
+        s5.next = h2
+
+    def send(self,no):
+        sleep(random.randrange(0,3,1))
+        #sleep(random.uniform(0,5))
+        msg = Msg("hello"+str(no),"h1","h2")
+        self.c.topo['h1'].send_msg(msg)
+
+    def test(self):
+        self.c.topo['s2'].to_controller = 1
+
+    def update(self):
+        sleep(1.2)
+        self.c.topo['s2'].to_controller = 1
+
+        sleep(1)
+        print "--------------------------"
+        print "update network "
+        print "--------------------------"
+
+        self.c.topo['h1'].next = self.c.topo['s1']
+        self.c.topo['s1'].next = self.c.topo['s2']
+        self.c.topo['s2'].next = self.c.topo['s6']
+        self.c.topo['s6'].next = self.c.topo['s7']
+        self.c.topo['s7'].next = self.c.topo['s5']
+        self.c.topo['s5'].next = self.c.topo['h2']
+
+
+        self.c.topo['s2'].to_controller = 0
+        self.c.send_packet_out()
+
+        # #first host
+        # self.head = Host(topo[0])
+        # p = self.head
+        # self.c.topo[topo[0]] = p
+
+        # #init switch
+        # for i in topo[1:-1]:
+        #     switch = Switch(i,self.c)
+        #     p.next = switch
+        #     p = p.next
+        #     self.c.topo[i] = p
+        
+        # #last host
+        # host = Host(topo[-1])
+        # p.next = host
+        # p = p.next
+        # self.c.topo[topo[-1]] = p
+
+if __name__ == '__main__':
+
+    network = Network()
+    network.initnetwork()
+
+    # threads = []
+    # for i in range(0,3):
+    #     t = threading.Thread(target=network.send,args=(i,))
+    #     threads.append(t)
+
+    # for t in threads:
+    #     t.setDaemon(True)
+    #     t.start()
+    # t.join()
+
+
+
+
+
+    threads = []
+    t2 = threading.Thread(target=network.update)
+    threads.append(t2)
+    for i in range(0,5):
+        t1 = threading.Thread(target=network.send,args=(i,))
+        threads.append(t1)
+
+
+    for t in threads:
+        t.setDaemon(True)
+        t.start()
+    t.join()
+
+    print "----------h1-----------"
+    print network.c.topo['h1'].send_count
+    print "-----------------------"
+
+    print "----------s1-----------"
+    print network.c.topo['s1'].count
+    print "-----------------------"
+
+    print "----------s2-----------"
+    print network.c.topo['s2'].count
+    print "-----------------------"
+
+    print "----------s3-----------"
+    print network.c.topo['s3'].count
+    print "-----------------------"
+
+    print "----------s4-----------"
+    print network.c.topo['s4'].count
+    print "-----------------------"
+
+    print "----------s5-----------"
+    print network.c.topo['s5'].count
+    print "-----------------------"
+
+    print "----------s6-----------"
+    print network.c.topo['s6'].count
+    print "-----------------------"
+
+    print "----------s7-----------"
+    print network.c.topo['s7'].count
+    print "-----------------------"
+
+    print "----------h2-----------"
+    print network.c.topo['h2'].get_count
+    print "-----------------------"
+
+    print "----------c0-----------"
+    print network.c.count
+    print "-----------------------"
+
+    # print "all over"
+
+# print network.c.topo['s4'].next
