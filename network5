@@ -1,0 +1,682 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import threading
+import Queue
+from time import ctime,sleep
+import time
+import random
+from scipy import stats
+
+class Msg(object):
+    def __init__(self,info,src,dst):
+        self.src = src
+        self.dst = dst
+        self.info = info
+
+class PacketIn(object):
+    def __init__(self,msg,sw):
+        self.msg = msg
+        self.sw = sw
+
+class Controller(object):
+    def __init__(self,index):
+        self.index = index
+        self.topo={}
+        
+        self.que = Queue.Queue(20000)
+        self.q={}
+
+        #upload all count
+        self.count = 0
+
+        #update2,send to dst 
+        self.count_to_dst = 0
+        #update1 and 2,send to each switch
+        self.count_to_sw = {}
+
+        #update1 and 2,each switch upload count
+        self.count_sw={}
+
+        self.update_type = 0
+
+    def get_packet_in(self,packet_in):
+        #sleep(random.uniform(0.01,1))
+
+        if self.update_type == 1 or self.update_type == 3:
+            self.que.put(packet_in)
+
+            if packet_in.sw not in self.count_sw.keys():
+                self.count_sw[packet_in.sw] = 1
+            else:
+                self.count_sw[packet_in.sw] +=1
+
+        if self.update_type == 2:
+            if packet_in.sw not in self.q.keys():
+                self.q[packet_in.sw] = Queue.Queue(20000)
+                self.q[packet_in.sw].put(packet_in)
+
+                self.count_sw[packet_in.sw] = 1
+
+            else:
+                self.q[packet_in.sw].put(packet_in)
+
+                self.count_sw[packet_in.sw]+=1
+
+        self.count+=1    
+
+        #print self.index + " get packet_in("+packet_in.msg.info+") from "+packet_in.sw
+        #print "updating network......"
+
+    def send_packet_out(self):
+        while not self.que.empty():
+            self.packet_out = self.que.get()
+            #print self.index+" send packet_out("+self.packet_out.msg.info+") to "+self.packet_out.sw
+
+            if self.packet_out.sw not in self.count_to_sw.keys():
+                self.count_to_sw[self.packet_out.sw] = 1
+            else:
+                self.count_to_sw[self.packet_out.sw]+=1            
+
+            #self.topo[self.packet_out.sw].get_from_controller(self.packet_out.msg)
+            t = threading.Thread(target=self.topo[self.packet_out.sw].get_from_controller,args=(self.packet_out.msg,))
+            t.start()
+
+    def send_sw_packet_out(self,sw):
+        if sw in self.q.keys():
+            while not self.q[sw].empty():
+                self.packet_out = self.q[sw].get()
+        
+                #print self.index+" send packet_out("+self.packet_out.msg.info+") to "+self.packet_out.sw
+                
+                if sw not in self.count_to_sw.keys():
+                    self.count_to_sw[sw] = 1
+                else:
+                    self.count_to_sw[sw]+=1
+
+                #self.topo[sw].get_from_controller(self.packet_out.msg)
+
+                t = threading.Thread(target=self.topo[sw].get_from_controller,args=(self.packet_out.msg,))
+                t.start()
+
+    def send_sw_packet_out_to(self,sw,dst):
+        if sw in self.q.keys():
+            while not self.q[sw].empty():
+                self.packet_out = self.q[sw].get()
+
+                #print self.index+" send packet_out("+self.packet_out.msg.info+") to "+dst
+                self.count_to_dst+=1
+
+                t = threading.Thread(target=self.topo[dst].get_from_controller,args=(self.packet_out.msg,))
+                t.start()
+
+    def send_packet_out_to(self,dst):
+        while not self.que.empty():
+            self.packet_out = self.que.get()
+
+            #print self.index+"send packet_out("+self.packet_out.msg.info+") to "+dst
+            self.count_to_dst+=1
+
+            t = threading.Thread(target=self.topo[dst].get_from_controller,args=(self.packet_out.msg,))
+            t.start()
+        
+class Host(object):
+    def __init__(self,index,p=0):
+        self.index = index
+        self.next = p
+        self.que = Queue.Queue(20000)
+        self.send_count = 0
+        self.get_count = 0
+
+    def send_msg(self,msg):
+        self.msg = msg
+        #print self.index+" send msg:"+msg.info+" "+ctime()
+        self.send_count+=1
+        self.next.get_msg(self.msg)
+        
+    def get_msg(self,msg):
+        sleep(random.uniform(0.01,1))
+        self.que.put(msg)
+        #print self.index+" get  msg:"+self.que.get().info
+        self.get_count+=1
+
+
+class Switch(object):
+    def __init__(self,index,controller,p=0):
+        self.index = index
+        self.next = p
+        self.controller = controller
+        self.que = Queue.Queue(20000)
+        self.to_controller = 0
+        self.count=0
+
+    def get_msg(self,msg):
+        sleep(random.uniform(0.01,1))
+        self.que.put(msg)
+        self.count+=1
+        #print self.index+" get  msg:"+msg.info
+        #if self.index != msg.dst:
+        self.send_msg()
+
+    def send_msg(self):
+        msg = self.que.get()
+        if self.to_controller:
+            self.send_to_controller(msg)
+        else:
+            #print self.index+" send msg:"+msg.info
+            self.next.get_msg(msg)
+
+    def send_to_controller(self,msg):
+        packet_in = PacketIn(msg,self.index)
+        #print self.index+" send msg:"+msg.info+" to controller"
+        self.controller.get_packet_in(packet_in)
+
+    def get_from_controller(self,msg):
+        sleep(random.uniform(0.01,1))
+        self.que.put(msg)
+        #print self.index+" get packet out:"+msg.info
+        #if self.index != msg.dst:
+        self.next.get_msg(msg)     
+
+
+class Network(object):
+    def __init__(self,mu):
+        #init controller
+        self.c = Controller('c0')
+        self.head = 0
+        self.dst = 0
+        self.num = 0
+        self.update = []
+        self.delete = []
+        self.init_time = 0
+        self.cost_time = 0
+
+        self.msg = 0
+
+        #define poisson rate
+        self.mu = mu
+
+    def initnetwork(self):
+        start = time.time()
+        h1 = Host('h1')
+        self.c.topo['h1'] = h1
+        h2 = Host('h2')
+        self.c.topo['h2'] = h2
+
+        f = open("rules.txt")
+        self.num = int(f.readline())
+        for i in range(1,self.num+1):
+            switch = Switch('s%d'%(i),self.c)
+            self.c.topo['s%d'%(i)] = switch
+
+        state = f.readline().split()
+        h1.next = self.c.topo[state[0]]
+        self.c.topo[state[1]].next = h2
+        
+        while 1:
+            line = f.readline()
+            if not line:
+                break
+            state = line.split()
+            if state[1] != '0':
+                self.c.topo[state[0]].next = self.c.topo[state[1]]
+
+        f.close()
+        self.init_time = time.time()-start
+            
+
+    def send(self,no):
+        #sleep(random.randrange(0,3,1))
+        sleep(random.uniform(0,0.01))
+        msg = Msg("hello"+str(no),"h1","h2")
+        self.c.topo['h1'].send_msg(msg)
+
+    def set_transitional_rules(self,sw):
+        sleep(random.uniform(0.01,0.1))
+        self.c.topo[sw].to_controller = 1
+
+    def set_next(self,front,behind):
+        #analog update flowtable delay
+        sleep(random.uniform(0.01,0.1))
+        self.c.topo[front].next = self.c.topo[behind]
+        if self.c.update_type == 2:
+            self.c.topo[front].to_controller = 0
+
+            # t = threading.Thread(target=self.c.send_sw_packet_out,args=(front,))
+            # #t.setDaemon(True)
+            # t.start()
+            self.c.send_sw_packet_out(front)
+
+        elif self.c.update_type == 3:
+            self.c.topo[front].to_controller = 0
+
+        ##print time.time()
+
+    def delete_next(self,front):
+        #analog update flowtable delay
+        sleep(random.uniform(0.01,0.1))
+        self.c.topo[front].next = 0
+        if self.c.update_type == 2 or self.c.update_type == 3:
+            self.c.topo[front].to_controller = 0
+        ##print time.time()
+
+    #update based on division
+    def update1(self):
+        self.c.update_type = 1
+
+        f = open('rules.txt')
+        f.readline()
+        f.readline()
+        while 1:
+            line = f.readline()
+            if not line:
+                break
+            state = line.split()
+            if state[1] != state[2]:
+                self.update.append(state)
+
+        f.close()
+
+        #after 2s,start update
+        sleep(2)
+
+        start = time.time()
+
+        #analog update delay
+        sleep(random.uniform(0.01,0.1))
+        self.c.topo[self.update[0][0]].to_controller = 1
+
+        #wait for the entire network end to end delay
+        sleep(6)
+
+        #print "----------------------------------"
+        #print "update network based on division"
+        #print "----------------------------------"
+
+        #analog update delay
+        #sleep(1)
+
+        update_threads=[]
+        for state in self.update:
+            if state[2] != '0':
+                t = threading.Thread(target=self.set_next,args=(state[0],state[2],))
+            else:
+                t = threading.Thread(target=self.delete_next,args=(state[0],))
+            update_threads.append(t)
+
+        for t in update_threads:
+            t.setDaemon(True)
+            t.start()
+
+        for t in update_threads:
+            t.join()
+
+        self.c.topo[self.update[0][0]].to_controller = 0
+
+        #self.cost_time = time.time()-start
+
+        self.c.send_packet_out()
+
+        self.cost_time = time.time()-start
+
+    #update based on transitional rules
+    def update2(self):
+        self.c.update_type = 2
+
+        f = open('rules.txt')
+
+        f.readline()
+        self.dst = f.readline().split()[1]
+
+        while 1:
+            line = f.readline()
+            if not line:
+                break
+            state = line.split()
+            if state[1] != state[2] and state[2] != '0':
+                self.update.append(state)
+            if state[1] != state[2] and state[2] == '0':
+                self.delete.append(state)
+
+        f.close()
+
+        sleep(5)
+
+        start = time.time()
+
+        #print "--------------------------------------------"
+        #print "update network based on transitional rules"
+        #print "--------------------------------------------"
+
+        #set transitional rules
+        set_transitional_threads=[]
+        for state in self.update:
+            # sleep(0.1)
+            # self.c.topo[state[0]].to_controller = 1
+            t = threading.Thread(target=self.set_transitional_rules,args=(state[0],))
+            set_transitional_threads.append(t)
+
+        for state in self.delete:
+            # sleep(0.1)
+            # self.c.topo[state[0]].to_controller = 1
+            t = threading.Thread(target=self.set_transitional_rules,args=(state[0],))
+            set_transitional_threads.append(t)
+
+        for t in set_transitional_threads:
+            t.setDaemon(True)
+            t.start()
+
+        for t in set_transitional_threads:
+            t.join()
+
+        #wait for the switch end to end delay
+        sleep(1)
+
+        update_threads=[]
+        for state in self.update:
+            # #analog each switch update delay 
+            # sleep(0.1)
+            # self.c.topo[state[0]].next = self.c.topo[state[2]]
+            # self.c.topo[state[0]].to_controller = 0
+            # ##print time.time()
+
+            # t = threading.Thread(target=self.c.send_sw_packet_out,args=(state[0],))
+            # #t.setDaemon(True)
+            # t.start()
+
+            t = threading.Thread(target=self.set_next,args=(state[0],state[2],))
+            update_threads.append(t)
+
+        for state in self.delete:
+            # sleep(0.1)
+            # self.c.topo[state[0]].next = 0
+            # self.c.topo[state[0]].to_controller = 0
+            # ##print time.time()
+
+            t = threading.Thread(target=self.delete_next,args=(state[0],))
+            update_threads.append(t)
+
+        for t in update_threads:
+            t.setDaemon(True)
+            t.start()
+
+        for t in update_threads:
+            t.join()
+
+
+        for state in self.delete:
+            t = threading.Thread(target=self.c.send_sw_packet_out_to,args=(state[0],self.dst,))
+            t.start()  
+
+        self.cost_time = time.time()-start
+
+    def update3(self):
+        self.c.update_type = 3
+
+        f = open('rules.txt')
+
+        f.readline()
+        self.dst = f.readline().split()[1]
+
+        while 1:
+            line = f.readline()
+            if not line:
+                break
+            state = line.split()
+            if state[1] != state[2]:
+                self.update.append(state)
+
+        f.close()
+
+        sleep(2)
+
+        start = time.time()
+
+        #print "--------------------------------------------"
+        #print "update network based on transitional rules"
+        #print "--------------------------------------------"
+
+        #set transitional rules
+        set_transitional_threads=[]
+        for state in self.update:
+            t = threading.Thread(target=self.set_transitional_rules,args=(state[0],))
+            set_transitional_threads.append(t)
+
+        for t in set_transitional_threads:
+            t.setDaemon(True)
+            t.start()
+
+        for t in set_transitional_threads:
+            t.join()
+
+        #wait for the switch end to end delay
+        sleep(6)
+
+        update_threads=[]
+        for state in self.update:
+            if state[2] != '0':
+                t = threading.Thread(target=self.set_next,args=(state[0],state[2],))
+                update_threads.append(t)
+            else:
+                t = threading.Thread(target=self.delete_next,args=(state[0],))
+                update_threads.append(t)
+
+        for t in update_threads:
+            t.setDaemon(True)
+            t.start()
+
+        for t in update_threads:
+            t.join()
+
+        #self.cost_time = time.time()-start
+
+        self.c.send_packet_out_to(self.dst)
+
+        self.cost_time = time.time()-start 
+
+    #my method of updating
+    #def myupdate(self):
+
+    def print_info(self):
+        print "init_time:",self.init_time
+        print "h1:",self.c.topo['h1'].send_count
+
+        for i in range(1,self.num+1):
+            print "s%s:"%(i),self.c.topo['s%s'%i].count
+
+        print "h2:",self.c.topo['h2'].get_count
+
+        print "c0:",self.c.count
+
+        print "switch upload:"
+        for key in self.c.count_sw:
+           print key+":",self.c.count_sw[key]
+
+        if self.c.update_type == 1:
+            print "update1,send back to network:"
+            for key in self.c.count_to_sw:
+               print key+":",self.c.count_to_sw[key]
+        elif self.c.update_type == 2:
+            print "update2,send to switch:"
+            for key in self.c.count_to_sw:
+               print key+":",self.c.count_to_sw[key]
+
+            print "update2,controller send to dst(%s):"%(self.dst),self.c.count_to_dst
+
+        elif self.c.update_type == 3:
+            print "update3,controller send to dst(%s):"%(self.dst),self.c.count_to_dst
+       
+        print "update cost time:",self.cost_time
+
+        print "need to update:",len(self.update)+len(self.delete)
+
+        while not self.c.que.empty():
+            packet = self.c.que.get()
+            print packet.sw+":"+packet.msg.info
+
+        for key in self.c.q.keys():
+            while not self.c.q[key].empty():
+                print key+":"+self.c.q[key].get().msg.info
+
+    def save_info1(self):
+        f = open("update1(2)_"+str(self.mu)+".txt","a")
+        f.write("init_time:"+str(self.init_time)+"\n")
+        f.write("h1:"+str(self.c.topo['h1'].send_count)+"\n")
+
+        for i in range(1,self.num+1):
+            f.write("s%s:"%(i)+str(self.c.topo['s%s'%i].count)+"\n")
+
+        f.write("h2:"+str(self.c.topo['h2'].get_count)+"\n")
+
+        f.write("c0:"+str(self.c.count)+"\n")
+
+        f.write("switch upload:"+"\n")
+        for key in self.c.count_sw:
+            f.write(key+":"+str(self.c.count_sw[key])+"\n")
+
+        if self.c.update_type == 1:
+            f.write("update1,send back to network:"+"\n")
+            for key in self.c.count_to_sw:
+                f.write(key+":"+str(self.c.count_to_sw[key])+"\n")
+        elif self.c.update_type == 2:
+            f.write("update2,send to switch:"+"\n")
+            for key in self.c.count_to_sw:
+                f.write(key+":"+str(self.c.count_to_sw[key])+"\n")
+
+            f.write("update2,controller send to dst(%s):"%(self.dst)+str(self.c.count_to_dst)+"\n")
+
+        elif self.c.update_type == 3:
+            f.write("update3,controller send to dst(%s):"%(self.dst)+str(self.c.count_to_dst)+"\n")
+       
+        f.write("update cost time:"+str(self.cost_time)+"\n")
+
+        f.write("need to update:"+str(len(self.update)+len(self.delete))+"\n")
+
+        while not self.c.que.empty():
+            packet = self.c.que.get()
+            f.write(packet.sw+":"+packet.msg.info)
+
+        for key in self.c.q.keys():
+            while not self.c.q[key].empty():
+                f.write(key+":"+self.c.q[key].get().msg.info)
+
+        f.write("-----------------------------------------------"+"\n")
+
+    def save_info3(self):
+        f = open("update3(2)_"+str(self.mu)+".txt","a")
+        f.write("init_time:"+str(self.init_time)+"\n")
+        f.write("h1:"+str(self.c.topo['h1'].send_count)+"\n")
+
+        for i in range(1,self.num+1):
+            f.write("s%s:"%(i)+str(self.c.topo['s%s'%i].count)+"\n")
+
+        f.write("h2:"+str(self.c.topo['h2'].get_count)+"\n")
+
+        f.write("c0:"+str(self.c.count)+"\n")
+
+        f.write("switch upload:"+"\n")
+        for key in self.c.count_sw:
+            f.write(key+":"+str(self.c.count_sw[key])+"\n")
+
+        if self.c.update_type == 1:
+            f.write("update1,send back to network:"+"\n")
+            for key in self.c.count_to_sw:
+                f.write(key+":"+str(self.c.count_to_sw[key])+"\n")
+        elif self.c.update_type == 2:
+            f.write("update2,send to switch:"+"\n")
+            for key in self.c.count_to_sw:
+                f.write(key+":"+str(self.c.count_to_sw[key])+"\n")
+
+            f.write("update2,controller send to dst(%s):"%(self.dst)+str(self.c.count_to_dst)+"\n")
+
+        elif self.c.update_type == 3:
+            f.write("update3,controller send to dst(%s):"%(self.dst)+str(self.c.count_to_dst)+"\n")
+       
+        f.write("update cost time:"+str(self.cost_time)+"\n")
+
+        f.write("need to update:"+str(len(self.update)+len(self.delete))+"\n")
+
+        while not self.c.que.empty():
+            packet = self.c.que.get()
+            f.write(packet.sw+":"+packet.msg.info)
+
+        for key in self.c.q.keys():
+            while not self.c.q[key].empty():
+                f.write(key+":"+self.c.q[key].get().msg.info)
+
+        f.write("-----------------------------------------------"+"\n")
+
+    def host_send_msg(self):
+        while self.msg <= 15000:
+            threads = []
+            data = stats.poisson.rvs(mu=self.mu,loc=0,size=1)
+            for n in range(0,data):
+                self.msg+=1
+                t = threading.Thread(target=self.send,args=(self.msg,))
+            #     threads.append(t)
+            # for t in threads:
+                #t.setDaemon(True)
+                t.start()
+            # for t in threads:
+            #     t.join()
+            sleep(0.01)
+
+def network_update1(mu):
+    network = Network(mu)
+    network.initnetwork()
+
+    threads = []
+    t2 = threading.Thread(target=network.update1)
+    threads.append(t2)
+    t1 = threading.Thread(target=network.host_send_msg)
+    threads.append(t1)
+
+    for t in threads:
+        t.setDaemon(True)
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    #wait for child process
+    sleep(10)
+
+    print "-----------------------------"
+    #network.print_info()
+    network.save_info1()
+
+def network_update3(mu):
+    network = Network(mu)
+    network.initnetwork()
+
+    threads = []
+    t2 = threading.Thread(target=network.update3)
+    threads.append(t2)
+    t1 = threading.Thread(target=network.host_send_msg)
+    threads.append(t1)
+
+    for t in threads:
+        t.setDaemon(True)
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    #wait for child process
+    sleep(10)
+
+    print "-----------------------------"
+    #network.print_info()
+    network.save_info3()
+
+if __name__ == '__main__':
+    print "start..."
+    for mu in range(1,18):
+        for i in range(1,10):
+            network_update1(mu)
+            print "save update1(2)_%d_%d"%(mu,i)
+
+    for mu in range(1,18):
+        for i in range(1,10):
+            network_update3(mu)
+            print "save update3(2)_%d_%d"%(mu,i)
