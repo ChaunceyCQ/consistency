@@ -1,0 +1,18 @@
+f1 = open('update3(2)_packet.txt',"a")
+f2 = open('update3(2)_time.txt',"a")
+for i in range(1,18):
+    f = open('update3(2)_%d.txt'%(i))
+    while 1:
+        line = f.readline()
+        if not line:
+            break
+        if "c0:" in line:
+            f1.write(line.strip("c0:").strip("\n")+" ")
+        elif "update cost time:" in line:
+            f2.write(line.strip("update cost time:").strip("\n")+" ")
+    f1.write("\n")
+    f2.write("\n")
+f1.close()
+f2.close()
+
+
